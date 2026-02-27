@@ -1,0 +1,115 @@
+name: 360V6专属-单独编译9个缺失kmod模块（APK）
+
+# 仅手动触发编译
+on:
+  workflow_dispatch:
+
+env:
+  # 适配你的ImmortalWrt SNAPSHOT源码（360V6适配版）
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  REPO_BRANCH: master  # SNAPSHOT对应master分支
+  TZ: Asia/Shanghai
+  # 你的9个缺失模块列表
+  KMOD_LIST: "kmod-fuse kmod-fs-btrfs kmod-ipt-extra kmod-ipt-nat kmod-ipt-nat6 kmod-ipt-physdev kmod-nf-ipvs kmod-veth kmod-ipt-fullconenat"
+  # 匹配你的内核版本6.6.89
+  KERNEL_VERSION: 6.6.89
+
+jobs:
+  build-kmod:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 1. 初始化编译环境（适配ARMv8）
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt update -y
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+            file wget curl autoconf automake libtool pkg-config device-tree-compiler
+          # 安装APK打包工具（适配ImmortalWrt的APK包管理）
+          git clone --depth=1 https://github.com/alpinelinux/apk-tools.git
+          cd apk-tools
+          ./scripts/autogen.sh
+          ./configure --prefix=/usr --disable-static
+          make -j$(nproc) && sudo make install
+          cd .. && rm -rf apk-tools
+
+      - name: 2. 克隆ImmortalWrt源码（匹配SNAPSHOT）
+        run: |
+          git clone --depth=1 -b $REPO_BRANCH --single-branch $REPO_URL openwrt
+          cd openwrt
+          echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
+          # 更新feeds（仅更新内核/模块相关）
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a -p kernel
+          ./scripts/feeds install -a -p packages
+
+      - name: 3. 配置编译参数（精准匹配360V6+6.6.89内核）
+        run: |
+          cd $OPENWRT_PATH
+          # 加载360V6基础配置（qualcommax/ipq60xx）
+          echo "CONFIG_TARGET_qualcommax=y" > .config
+          echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
+          echo "CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_qihoo_360v6=y" >> .config
+          echo "CONFIG_DEVEL=y" >> .config
+          echo "CONFIG_CCACHE=y" >> .config
+          echo "CONFIG_PACKAGE_MANAGER=apk" >> .config
+          echo "CONFIG_APK_BUILD=y" >> .config
+          echo "CONFIG_KERNEL_VERSION=$KERNEL_VERSION" >> .config
+          echo "CONFIG_KERNEL_PATCHVER=6.6" >> .config
+          
+          # 核心：开启9个缺失模块编译
+          echo "CONFIG_PACKAGE_kmod-fuse=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-fs-btrfs=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-ipt-extra=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-ipt-nat=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-ipt-nat6=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-ipt-physdev=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-nf-ipvs=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-veth=y" >> .config
+          echo "CONFIG_PACKAGE_kmod-ipt-fullconenat=y" >> .config
+          
+          # 关闭所有无关编译（仅保留模块）
+          echo "CONFIG_TARGET_ROOTFS_INITRAMFS=n" >> .config
+          echo "CONFIG_ALL=n" >> .config
+          echo "CONFIG_ALL_KMODS=n" >> .config
+          echo "CONFIG_ALL_NONSHARED=n" >> .config
+          
+          # 生成最终配置（验证语法）
+          make defconfig
+
+      - name: 4. 下载模块依赖（仅下载必要源码）
+        run: |
+          cd $OPENWRT_PATH
+          make download -j$(nproc)
+
+      - name: 5. 单独编译9个kmod模块（适配6.6.89内核）
+        run: |
+          cd $OPENWRT_PATH
+          # 逐个编译，确保每个模块都成功
+          for KMOD in $KMOD_LIST; do
+              echo "开始编译模块：$KMOD"
+              make package/$KMOD/compile V=s -j$(nproc) || make package/$KMOD/compile V=s -j1
+          done
+          # 转换IPK为APK（适配你的固件APK包管理）
+          mkdir -p ./ipk2apk
+          find bin -name "*.ipk" -exec cp {} ./ipk2apk/ \;
+          ./scripts/ipk2apk.sh ./ipk2apk/*.ipk
+
+      - name: 6. 整理模块包（仅保留9个APK）
+        run: |
+          mkdir -p ./kmod-output
+          # 筛选并复制你的9个模块APK
+          for KMOD in $KMOD_LIST; do
+              find $OPENWRT_PATH/bin -name "${KMOD}-${KERNEL_VERSION}*.apk" -exec cp {} ./kmod-output/ \;
+          done
+          # 列出产物，确认生成成功
+          echo "编译完成的模块列表："
+          ls -l ./kmod-output/
+
+      - name: 7. 上传模块包到Artifacts（可直接下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: 360V6-kmod-6.6.89-${{ github.run_id }}
+          path: ./kmod-output/
+          retention-days: 90  # 保留90天，足够你下载
