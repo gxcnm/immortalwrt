@@ -3,7 +3,7 @@ name: 360V6 9个kmod模块自动编译(apk格式)
 on:
   workflow_dispatch:
 
-jobs
+jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
