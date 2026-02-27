@@ -18,14 +18,17 @@ jobs:
   build-kmod:
     runs-on: ubuntu-24.04
     steps:
-      - name: 1. 初始化编译环境（适配ARMv8）
+      - name: 1. 初始化编译环境（适配Ubuntu 24.04）
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
           sudo apt update -y
+          # 替换python3-distutils为python3-setuptools（Ubuntu24.04兼容）
           sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libssl-dev python3-distutils rsync unzip zlib1g-dev \
+            gettext git libncurses5-dev libssl-dev python3-setuptools rsync unzip zlib1g-dev \
             file wget curl autoconf automake libtool pkg-config device-tree-compiler
+          # 手动安装distutils（Ubuntu24.04 fallback方案）
+          sudo ln -s /usr/lib/python3/dist-packages/setuptools/_distutils /usr/lib/python3/dist-packages/distutils
           # 安装APK打包工具（适配ImmortalWrt的APK包管理）
           git clone --depth=1 https://github.com/alpinelinux/apk-tools.git
           cd apk-tools
