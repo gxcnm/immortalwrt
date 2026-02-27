@@ -1,70 +1,44 @@
-name: 360V6-编译9个内核模块(APK格式)
+name: 360V6 9个kmod模块自动编译(apk格式)
 
 on:
   workflow_dispatch:
 
-env:
-  # 适配APK格式的ImmortalWrt源码（360V6专用）
-  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
-  REPO_BRANCH: openwrt-23.05  # 稳定分支，默认支持APK
-  TZ: Asia/Shanghai
-  KERNEL_VERSION: 6.6.89
-  # 9个缺失模块列表（APK格式）
-  KMOD_LIST: "kmod-fuse kmod-fs-btrfs kmod-ipt-extra kmod-ipt-nat kmod-ipt-nat6 kmod-ipt-physdev kmod-nf-ipvs kmod-veth kmod-ipt-fullconenat"
-
-jobs:
-  build-kmod:
-    runs-on: ubuntu-24.04
+jobs
+  build:
+    runs-on: ubuntu-22.04
     steps:
-      - name: 1. 初始化环境（适配Ubuntu24.04 + APK编译）
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: 安装依赖
         run: |
-          sudo apt update -y
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
-            gettext git libncurses5-dev libssl-dev python3-setuptools rsync unzip zlib1g-dev \
-            file wget curl autoconf automake libtool pkg-config device-tree-compiler apk-tools
-          # 修复distutils依赖（Ubuntu24.04兼容）
-          sudo ln -s /usr/lib/python3/dist-packages/setuptools/_distutils /usr/lib/python3/dist-packages/distutils
+          sudo apt update
+          sudo apt install -y build-essential clang flex bison gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file wget curl
 
-      - name: 2. 克隆源码并更新feeds（完整加载APK规则）
+      - name: 克隆 ImmortalWrt
+        uses: actions/checkout@v4
+        with:
+          repository: immortalwrt/immortalwrt
+          ref: master
+          path: openwrt
+
+      - name: 更新 feeds
         run: |
-          git clone --depth=1 -b $REPO_BRANCH --single-branch $REPO_URL openwrt
           cd openwrt
-          echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-          # 完整更新feeds（包含APK打包工具）
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 安装APK相关feeds（关键）
-          ./scripts/feeds install apk-tools
 
-      - name: 3. 配置360V6 + APK + 内核模块（核心修复）
+      - name: 生成配置（360V6 + 只开9个模块 + apk格式）
         run: |
-          cd $OPENWRT_PATH
-          # 加载360V6官方默认配置（qualcommax/ipq60xx）
-          cp target/linux/qualcommax/ipq60xx/config-6.6 .config
-          # 追加核心配置：APK格式 + 9个模块 + 内核规则
-          cat >> .config << EOF
-          # 强制开启APK包管理（新版OpenWrt默认）
-          CONFIG_PACKAGE_MANAGER=apk
-          CONFIG_APK_BUILD=y
-          CONFIG_APK_TOOLS=y
-          # 编译基础配置
+          cd openwrt
+          cat > .config << EOF
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq60xx=y
+          CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_qihoo_360v6=y
           CONFIG_DEVEL=y
           CONFIG_CCACHE=y
-          CONFIG_KERNEL_VERSION=$KERNEL_VERSION
-          CONFIG_KERNEL_PATCHVER=6.6
-          # 内核层配置（必须开启，否则kmod包无法生成）
-          CONFIG_KERNEL_FUSE_FS=y
-          CONFIG_KERNEL_BTRFS_FS=y
-          CONFIG_KERNEL_IP_NF_IPTABLES=y
-          CONFIG_KERNEL_IP_NF_NAT=y
-          CONFIG_KERNEL_IP6_NF_NAT=y
-          CONFIG_KERNEL_NF_CONNTRACK_PHYSDEV=y
-          CONFIG_KERNEL_IP_VS=y
-          CONFIG_KERNEL_VETH=y
-          CONFIG_KERNEL_NETFILTER_FULLCONENAT=y
-          # 生成APK格式的kmod包（关键）
+          CONFIG_PACKAGE_MANAGER=apk
+          CONFIG_APK_BUILD=y
+          CONFIG_KERNEL_6_6=y
+
           CONFIG_PACKAGE_kmod-fuse=y
           CONFIG_PACKAGE_kmod-fs-btrfs=y
           CONFIG_PACKAGE_kmod-ipt-extra=y
@@ -74,42 +48,37 @@ jobs:
           CONFIG_PACKAGE_kmod-nf-ipvs=y
           CONFIG_PACKAGE_kmod-veth=y
           CONFIG_PACKAGE_kmod-ipt-fullconenat=y
-          # 关闭固件编译，仅保留模块
+
+          CONFIG_TARGET_ROOTFS_SQUASHFS=n
+          CONFIG_TARGET_ROOTFS_EXT4=n
           CONFIG_TARGET_ROOTFS_INITRAMFS=n
           CONFIG_ALL=n
-          CONFIG_ALL_KMODS=n
-          CONFIG_ALL_NONSHARED=n
           EOF
-          # 生成最终配置（加载所有编译规则）
+
           make defconfig
 
-      - name: 4. 下载所有依赖（含APK工具）
+      - name: 下载依赖
         run: |
-          cd $OPENWRT_PATH
+          cd openwrt
           make download -j$(nproc)
 
-      - name: 5. 编译内核模块（修复路径：编译linux包）
+      - name: 编译内核模块（自动生成 apk）
         run: |
-          cd $OPENWRT_PATH
-          # 编译linux包（包含所有内核模块，生成APK格式）
-          make package/kernel/linux/compile V=s -j$(nproc) || make package/kernel/linux/compile V=s -j1
-          # 单独编译APK打包工具（确保格式正确）
-          make package/apk-tools/compile V=s -j$(nproc)
+          cd openwrt
+          make package/kernel/linux/compile -j$(nproc) V=s
 
-      - name: 6. 提取9个APK格式模块
+      - name: 提取 9 个 .apk
         run: |
-          mkdir -p ./kmod-output
-          # 筛选360V6适配的APK包（aarch64_cortex-a53架构）
-          for KMOD in $KMOD_LIST; do
-              find $OPENWRT_PATH/bin -name "${KMOD}-${KERNEL_VERSION}*-aarch64_cortex-a53.apk" -exec cp {} ./kmod-output/ \;
-          done
-          # 验证产物
-          echo "编译完成的APK模块列表："
-          ls -l ./kmod-output/
+          mkdir -p modules
+          cd openwrt
+          find bin -name 'kmod-fuse*.apk' -o -name 'kmod-fs-btrfs*.apk' \
+          -o -name 'kmod-ipt-extra*.apk' -o -name 'kmod-ipt-nat*.apk' \
+          -o -name 'kmod-ipt-nat6*.apk' -o -name 'kmod-ipt-physdev*.apk' \
+          -o -name 'kmod-nf-ipvs*.apk' -o -name 'kmod-veth*.apk' \
+          -o -name 'kmod-ipt-fullconenat*.apk' | xargs -I {} cp {} ../modules/
 
-      - name: 7. 上传APK包到Artifacts
+      - name: 上传模块
         uses: actions/upload-artifact@v4
         with:
-          name: 360V6-kmod-6.6.89-APK
-          path: ./kmod-output/
-          retention-days: 90
+          name: 360V6-kmod-apk
+          path: modules/
