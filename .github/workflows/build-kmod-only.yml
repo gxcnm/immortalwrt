@@ -1,174 +1,143 @@
-name: IPQ60XX-LibWrt
+name: Build 360V6 Modules (6.6.89) - APK
 
 on:
-  workflow_dispatch:
-  workflow_call:
-  # schedule:
-  #   - cron: 0 20 * * *
+  workflow_dispatch:  # 手动触发编译
 
 env:
-  REPO_URL: https://github.com/laipeng668/openwrt-6.x.git
-  REPO_BRANCH: main-nss
-  CONFIG_FILE: configs/IPQ60XX.config
-  GENERAL_CONFIG_FILE: configs/General.config
-  DIY_SCRIPT: scripts/Roc-script.sh
-  CLASH_KERNEL: amd64
-  UPLOAD_BIN_DIR: false
-  FIRMWARE_RELEASE: true
-  FIRMWARE_TAG: IPQ60XX
+  # 精准匹配你路由器的源码&提交（内核6.6.89）
+  REPO_URL: https://github.com/immortalwrt/immortalwrt
+  REPO_BRANCH: master
+  REPO_COMMIT: f9fbaa7017  # 从r34087-f9fbaa7017提取的核心提交ID
+  TARGET_PLATFORM: qualcommax/ipq60xx
+  MODULES_LIST: "kmod-fs-btrfs kmod-ipt-extra kmod-ipt-nat kmod-ipt-nat6 kmod-ipt-physdev kmod-nf-ipvs kmod-veth kmod-ipt-fullconenat kmod-fuse"
+  KERNEL_VERSION: 6.6.89  # 显式声明内核版本
   TZ: Asia/Shanghai
 
 jobs:
-  Build:
+  build-modules:
     runs-on: ubuntu-24.04
-
     steps:
-    - name: Check Server Performance(检查服务器性能)
-      run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
-        echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
-        echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
-        echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
-        echo "--------------------------硬盘信息--------------------------"
-        echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+      - name: 检查服务器性能
+        run: |
+          echo "CPU核心数: $(nproc)"
+          echo "内存信息:"
+          free -h
+          echo "磁盘信息:"
+          df -hT
 
-    - name: Initialization Environment(初始化环境)
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo -E apt-get -y update
-        sudo -E apt-get -y install $(curl -fsSL ophub.org/ubuntu2404-make-openwrt-depends)
-        sudo -E systemctl daemon-reload
-        sudo timedatectl set-timezone "$TZ"
+      - name: 初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt update && sudo apt install -y \
+            build-essential clang flex bison g++ gawk gcc-multilib \
+            gettext git libncurses5-dev libssl-dev python3-distutils \
+            rsync unzip zlib1g-dev file wget ccache curl \
+            libelf-dev libncursesw5-dev swig pkg-config
+          sudo timedatectl set-timezone "$TZ"
 
-    - name: Checkout(检出代码)
-      uses: actions/checkout@v4.1.7  # 同步升级到最新稳定版
+      - name: 克隆精准匹配的ImmortalWrt源码（内核6.6.89）
+        run: |
+          # 克隆指定分支 + 回滚到你路由器对应的提交ID
+          git clone --depth=1 -b $REPO_BRANCH --single-branch $REPO_URL openwrt
+          cd openwrt
+          git reset --hard $REPO_COMMIT  # 强制回滚到匹配内核6.6.89的提交
+          echo "OPENWRT_DIR=$(pwd)" >> $GITHUB_ENV
+          # 校验内核版本（避免编译错版本）
+          KERNEL_CHECK=$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' target/linux/generic/kernel-6.6)
+          if [ "$KERNEL_CHECK" != "$KERNEL_VERSION" ]; then
+            echo "错误：源码内核版本为 $KERNEL_CHECK，与目标 $KERNEL_VERSION 不匹配！"
+            exit 1
+          fi
+          echo "✅ 源码内核版本校验通过：$KERNEL_VERSION"
 
-    - name: Clone Source Code(克隆源代码)
-      run: |
-        df -hT $GITHUB_WORKSPACE
-        sudo mkdir -p /mnt/openwrt
-        sudo chown -R $(id -u):$(id -g) /mnt/openwrt
-        git clone --depth 1 -b $REPO_BRANCH --single-branch $REPO_URL /mnt/openwrt
-        cd /mnt/openwrt
-        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-        VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
-        echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
-        VERSION_KERNEL=$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' target/linux/generic/kernel-6.12)
-        echo "VERSION_KERNEL=$VERSION_KERNEL" >> $GITHUB_ENV
+      - name: 加载通用配置（复用General.config）
+        run: |
+          cd $OPENWRT_DIR
+          # 拷贝通用配置（适配ARMv8优化、ccache等）
+          cat > .config << EOF
+          ### 通用配置（复用General.config核心项） ###
+          CONFIG_DEVEL=y
+          CONFIG_TARGET_OPTIONS=y
+          CONFIG_TARGET_OPTIMIZATION="-O3 -pipe -march=armv8-a+crypto+crc -mcpu=cortex-a53+crypto+crc -mtune=cortex-a53"
+          CONFIG_CCACHE=y
+          CONFIG_PACKAGE_default-settings=y
+          CONFIG_PACKAGE_default-settings-chn=y
+          CONFIG_TARGET_PER_DEVICE_ROOTFS=y
+          CONFIG_LUCI_LANG_zh_Hant=y
+          # CONFIG_FEED_nss_packages is not set
+          # CONFIG_FEED_sqm_scripts_nss is not set
+          # CONFIG_TARGET_ROOTFS_INITRAMFS is not set
 
-    - name: Generate Variables(生成变量)
-      run: |
-        cp $CONFIG_FILE $OPENWRT_PATH/.config
-        cd $OPENWRT_PATH
-        make defconfig > /dev/null 2>&1
-        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
-        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
-        DEVICE_TARGET=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
-        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
-        DEVICE_SUBTARGET=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
-        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
-        echo "HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
-        echo "CACHE_DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+          ### 目标平台配置（360V6） ###
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq60xx=y
+          CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_qihoo_360v6=y
 
-    - name: Cache Toolchain(缓存工具链)
-      uses: actions/cache@v4.0.2  # 升级到最新稳定版
-      with:
-        key: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.HASH }} ${{ env.CACHE_DATE }}
-        restore-keys: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-
-        path: |
-          ${{ env.OPENWRT_PATH }}/.ccache
-          ${{ env.OPENWRT_PATH }}/staging_dir
-
-    - name: Refresh The Cache(刷新缓存)
-      run: |
-        if [ -d "$OPENWRT_PATH/staging_dir" ]; then
-          find "$OPENWRT_PATH/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r dir; do
-              find "$dir" -type f -exec touch {} +
+          ### 要编译的模块（均为模块模式=m，生成APK） ###
+          EOF
+          
+          # 追加目标模块配置
+          for module in $MODULES_LIST; do
+            echo "CONFIG_PACKAGE_${module}=m" >> .config
           done
-        fi
+          
+          # 禁用不必要项，缩短编译时间
+          echo "# CONFIG_TARGET_ROOTFS_TARGZ is not set" >> .config
+          echo "# CONFIG_TARGET_ROOTFS_SQUASHFS is not set" >> .config
+          echo "# CONFIG_BUILD_LOG is not set" >> .config
+          echo "CONFIG_NOSSTRIP=y" >> .config
 
-    - name: Install Feeds(安装feeds)
-      run: |
-        cd $OPENWRT_PATH
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
-  
-    - name: Load Custom Configuration(加载自定义配置)
-      run: |
-        chmod +x $DIY_SCRIPT
-        cd $OPENWRT_PATH
-        $GITHUB_WORKSPACE/$DIY_SCRIPT
+          # 生成最终配置
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          make defconfig
 
-    - name: Download DL Package(下载DL软件包)
-      run: |
-        cat $CONFIG_FILE $GENERAL_CONFIG_FILE > $OPENWRT_PATH/.config
-        cd $OPENWRT_PATH
-        make defconfig
-        make download -j$(nproc)
+      - name: 缓存工具链（加速二次编译）
+        uses: actions/cache@v4.0.2  # 升级到最新稳定版
+        with:
+          key: qualcommax-ipq60xx-kernel-${{ env.KERNEL_VERSION }}-${{ env.REPO_COMMIT }}
+          path: |
+            ${{ env.OPENWRT_DIR }}/staging_dir
+            ${{ env.OPENWRT_DIR }}/.ccache
 
-    - name: Compile Firmware(开始编译固件)
-      id: compile
-      run: |
-        cd $OPENWRT_PATH
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
-        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+      - name: 下载依赖包
+        run: |
+          cd $OPENWRT_DIR
+          make download -j$(nproc)
+          find dl -size -1024c -delete  # 清理无效下载文件
 
-    - name: Check Space Usage(检查空间使用情况)
-      if: (!cancelled())
-      run: df -hT
+      - name: 编译指定内核模块（仅编译模块，不编译固件）
+        run: |
+          cd $OPENWRT_DIR
+          # 先编译内核（保证模块依赖的内核头文件匹配）
+          make package/linux/compile -j$(nproc) || make package/linux/compile -j1 V=s
+          # 编译目标模块
+          for module in $MODULES_LIST; do
+            make package/$module/compile -j$(nproc) || make package/$module/compile -j1 V=s
+          done
 
-    - name: Upload Bin Directory(上传固件)
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      uses: actions/upload-artifact@v4.3.4  # 核心修复：升级到v4+
-      with:
-        name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.OPENWRT_PATH }}/bin
-        if-no-files-found: warn  # v4新增参数，避免无文件时直接失败
+      - name: 整理APK产物（仅保留目标模块）
+        run: |
+          mkdir -p output-modules
+          # 拷贝编译好的APK
+          find $OPENWRT_DIR/bin/packages/ -name "kmod-*.apk" -exec cp {} output-modules/ \;
+          # 过滤仅保留目标模块
+          cd output-modules
+          ls | grep -v -E "$(echo $MODULES_LIST | sed 's/ /|/g')" | xargs rm -f
+          # 输出产物信息
+          echo "✅ 编译完成的APK（内核${KERNEL_VERSION}）："
+          ls -l
+          # 校验APK架构（确保是ARMv8/aarch64）
+          for apk in *.apk; do
+            echo "🔍 校验 $apk 架构："
+            file $apk | grep -i "aarch64" || echo "⚠ $apk 架构不匹配！"
+          done
 
-    - name: Organize Files(整理文件)
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        cd $OPENWRT_PATH/bin/targets/*/*
-        cp $OPENWRT_PATH/.config IPQ60XX.config
-        mv config.buildinfo IPQ60XX.config.buildinfo
-        mv libwrt-qualcommax-ipq60xx.manifest IPQ60XX.manifest
-        mv -f $OPENWRT_PATH/bin/packages/*/*/*.apk packages
-        tar -zcf IPQ60XX.Packages.tar.gz packages
-        rm -rf packages feeds.buildinfo version.buildinfo sha256sums profiles.json
-        echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
-
-    - name: Upload Firmware To Artifact(将固件上传到Artifact)
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
-      uses: actions/upload-artifact@v4.3.4  # 核心修复：升级到v4+
-      with:
-        name: ${{ env.SOURCE_REPO }}-firmware-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
-        path: ${{ env.FIRMWARE_PATH }}
-        if-no-files-found: error  # 无固件时直接报错，符合预期
-
-    - name: Upload Firmware To Release(发布固件)
-      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
-      uses: ncipollo/release-action@v1.14.0  # 升级到最新稳定版
-      with:
-        name: ${{ env.DATE }} for ${{ env.FIRMWARE_TAG }}
-        allowUpdates: true
-        tag: ${{ env.FIRMWARE_TAG }}
-        token: ${{ secrets.GITHUB_TOKEN }}
-        artifacts: ${{ env.FIRMWARE_PATH }}/*
-        body: |
-          **This is OpenWrt Firmware for ${{ env.FIRMWARE_TAG }}**
-          ### 📒 固件信息
-          - 这是开启全功能NSS的6.12内核固件，默认主题为Aurora；该固件在ImmortalWrt的基础上，添加了额外的软件包cpufreq、ddns、ttyd、upnp、wolplus、samba4、vlmcsd、aria2、autoreboot、uhttpd、wifischedule、frps、frpc、diskman、hd-idle、banip、acme、arpbind、usb-printer、passwall、oaf、sqm、wireguard、watchcat、wechatpush、3cat、smartdns，并添加了若干工具，具体详见IPQ60XX.config和General.config。
-          - 💻 这是 ${{ env.FIRMWARE_TAG }} 平台使用的 OpenWrt 固件
-          - ⚽ 固件源码: ${{ env.REPO_URL }}
-          - 💝 源码分支: ${{ env.REPO_BRANCH }}
-          - 🌐 默认地址: **192.168.2.1**
-          - 🔑 默认密码: none
+      - name: 上传APK产物
+        uses: actions/upload-artifact@v4.3.4  # 核心修复：升级到v4+稳定版
+        with:
+          name: 360V6-Modules-Kernel${{ env.KERNEL_VERSION }}-${{ env.REPO_COMMIT }}
+          path: output-modules/
+          if-no-files-found: error  # 无APK文件时直接报错，便于排查问题
+          retention-days: 90  # 产物保留90天，足够下载使用
